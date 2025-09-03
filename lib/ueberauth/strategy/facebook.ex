@@ -3,8 +3,8 @@ defmodule Ueberauth.Strategy.Facebook do
   Facebook Strategy for Überauth.
   """
 
-  use Ueberauth.Strategy, default_scope: "email",
-                          profile_fields: "",
+  use Ueberauth.Strategy, default_scope: "email,public_profile",
+                          profile_fields: "id,email,gender,link,locale,name,timezone,updated_time,verified",
                           uid_field: :id,
                           allowed_request_params: [
                             :auth_type,
@@ -32,8 +32,8 @@ defmodule Ueberauth.Strategy.Facebook do
       |> maybe_replace_param(conn, "scope", :default_scope)
       |> maybe_replace_param(conn, "state", :state)
       |> maybe_replace_param(conn, "display", :display)
-      |> Enum.filter(fn {k,_v} -> Enum.member?(allowed_params, k) end)
-      |> Enum.map(fn {k,v} -> {String.to_existing_atom(k), v} end)
+      |> Enum.filter(fn {k, _v} -> Enum.member?(allowed_params, k) end)
+      |> Enum.map(fn {k, v} -> {String.to_existing_atom(k), v} end)
       |> Keyword.put(:redirect_uri, callback_url(conn))
       |> Ueberauth.Strategy.Facebook.OAuth.authorize_url!
 
@@ -45,15 +45,34 @@ defmodule Ueberauth.Strategy.Facebook do
   """
   def handle_callback!(%Plug.Conn{params: %{"code" => code}} = conn) do
     opts = [redirect_uri: callback_url(conn)]
-    client = Ueberauth.Strategy.Facebook.OAuth.get_token!([code: code], opts)
-    token = client.token
+    try do
+      client = Ueberauth.Strategy.Facebook.OAuth.get_token!([code: code], opts)
+      token = client.token
 
-    if token.access_token == nil do
-      err = token.other_params["error"]
-      desc = token.other_params["error_description"]
-      set_errors!(conn, [error(err, desc)])
+      if token.access_token == nil do
+        err = token.other_params["error"]
+        desc = token.other_params["error_description"]
+        set_errors!(conn, [error(err, desc)])
+      else
+        fetch_user(conn, client)
+      end
+    rescue
+      OAuth2.Error ->
+        set_errors!(conn, [error("invalid_code", "The code has been used or has expired")])
+    end
+  end
+
+  @doc """
+  Handles the callback from app with access_token.
+  """
+  def handle_callback!(%Plug.Conn{params: %{"access_token" => access_token}} = conn) do
+    client = Ueberauth.Strategy.Facebook.OAuth.client
+    token = OAuth2.AccessToken.new(access_token)
+
+    if check_access_token(conn, client, token) do
+      fetch_user(conn, %{client | token: token})
     else
-      fetch_user(conn, client)
+      set_errors!(conn, [error("token", "Token verification failed")])
     end
   end
 
@@ -146,7 +165,7 @@ defmodule Ueberauth.Strategy.Facebook do
   end
 
   defp fetch_image(uid) do
-    "http://graph.facebook.com/#{uid}/picture?type=large"
+    "https://graph.facebook.com/#{uid}/picture?type=large"
   end
 
   defp fetch_user(conn, client) do
@@ -211,7 +230,7 @@ defmodule Ueberauth.Strategy.Facebook do
   defp option(value, _conn, _key), do: value
 
   defp maybe_replace_param(params, conn, name, config_key) do
-    if params[name] do
+    if params[name] || is_nil(option(params[name], conn, config_key)) do
       params
     else
       Map.put(
