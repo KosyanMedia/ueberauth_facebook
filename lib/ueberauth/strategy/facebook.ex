@@ -222,7 +222,7 @@ defmodule Ueberauth.Strategy.Facebook do
     end
   end
 
-  def check_access_token(conn, client, token) do
+  def check_access_token(_conn, client, token) do
     app_id = client.client_id
     app_secret = client.client_secret
     query = URI.encode_query(%{
@@ -232,12 +232,38 @@ defmodule Ueberauth.Strategy.Facebook do
     path = "/debug_token?#{query}"
 
     case OAuth2.Client.get(client, path) do
-      {:ok, %OAuth2.Response{
-        status_code: 200,
-        body: %{"data" => %{"is_valid" => true, "app_id" => ^app_id}}
-      }} -> true
-      _ -> false
+      {:ok, %OAuth2.Response{status_code: 200, body: %{"data" => data}}} ->
+        is_valid = data["is_valid"] == true
+        app_id_match = data["app_id"] == app_id
 
+        if is_valid && app_id_match do
+          true
+        else
+          require Logger
+          Logger.error("facebook token check failed",
+            is_valid: is_valid,
+            app_id_matched: app_id_match,
+            app_id_received: data["app_id"],
+            fb_error_code: get_in(data, ["error", "code"]),
+            fb_error_message: get_in(data, ["error", "message"])
+          )
+          false
+        end
+
+      {:ok, %OAuth2.Response{status_code: status_code, body: body}} ->
+        require Logger
+        Logger.error("facebook debug_token unexpected response",
+          status_code: status_code,
+          body: inspect(body)
+        )
+        false
+
+      {:error, error} ->
+        require Logger
+        Logger.error("facebook debug_token request failed",
+          error: inspect(error)
+        )
+        false
     end
   end
 end
